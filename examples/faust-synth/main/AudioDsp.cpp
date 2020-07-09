@@ -5,6 +5,8 @@
 #include "AudioDsp.h"
 #include "driver/i2s.h"
 
+#include "../../../faust/FaustSynth.h"
+
 #define MULT_S16 32767
 #define DIV_S32 4.6566129e-10
 
@@ -13,8 +15,7 @@ fSampleRate(SR),
 fBufferSize(BS),
 fNumOutputs(2),
 fHandle(nullptr),
-fRunning(false),
-echo(10000)
+fRunning(false)
 {
   // config i2s pin numbers
   i2s_pin_config_t pin_config;
@@ -46,11 +47,23 @@ echo(10000)
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
   REG_WRITE(PIN_CTRL, 0xFFFFFFF0);
   
-  // setting up DSP objects
-  sine.init(SR);
-  echo.init(SR);
-  echo.setDel(10000);
-  echo.setFeedback(0.5);
+  fDSP = new mydsp();
+  fDSP->init(fSampleRate);
+  fUI = new MapUI();
+  fDSP->buildUserInterface(fUI);
+  outputs = new float*[2];
+  for (int channel = 0; channel < 2; ++channel){
+    outputs[channel] = new float[fBufferSize];
+  }
+}
+
+AudioDsp::~AudioDsp(){
+  delete fDSP;
+  delete fUI;
+  for (int channel = 0; channel < 2; ++channel){
+    delete[] outputs[channel];
+  }
+  delete [] outputs;
 }
 
 // starts audio task
@@ -58,6 +71,7 @@ bool AudioDsp::start()
 {
   if (!fRunning) {
     fRunning = true;
+    fUI->setParamValue("gate",1);
     return (xTaskCreatePinnedToCore(audioTaskHandler, "Audio DSP Task", 4096, (void*)this, 24, &fHandle, 0) == pdPASS);
   } 
   else {
@@ -77,7 +91,12 @@ void AudioDsp::stop()
 
 // set sine wave frequency
 void AudioDsp::setFreq(float freq){
-  sine.setFrequency(freq);
+  fUI->setParamValue("freq",freq);
+}
+
+// set sine wave frequency
+void AudioDsp::setCutoff(float freq){
+  fUI->setParamValue("cutoff",freq);
 }
 
 void AudioDsp::audioTask()
@@ -86,15 +105,16 @@ void AudioDsp::audioTask()
   while (fRunning) {
     int16_t samples_data_out[fNumOutputs*fBufferSize];
     
+    fDSP->compute(fBufferSize,NULL,outputs);
+    //printf("%f\n",outputs[0][0]);
+    
     // processing buffers
-    for (int i = 0; i < fBufferSize; i++) {
-      // DSP
-      float currentSample = echo.tick(sine.tick())*0.5;
-      
-      // copying to output buffer
-      samples_data_out[i*fNumOutputs] = currentSample*MULT_S16;
-      samples_data_out[i*fNumOutputs+1] = samples_data_out[i*fNumOutputs];
+    for (int channel = 0; channel < 2; ++channel){
+      for(int i=0; i<fBufferSize; i++){
+        samples_data_out[i*fNumOutputs+channel] = outputs[channel][i]*MULT_S16;
+      }
     }
+    
     // transmitting output buffer
     size_t bytes_written = 0;
     i2s_write((i2s_port_t)0, &samples_data_out, fNumOutputs*sizeof(int16_t)*fBufferSize, &bytes_written, portMAX_DELAY);
